@@ -74,13 +74,18 @@ exports.endActivity = async (req,res)=>{
    const start = coords[0];
    const end = coords[coords.length-1];
 
-   const distance = turf.distance(
+   // Straight-line displacement to check if they completed a loop
+   const displacement = turf.distance(
     turf.point(start),
     turf.point(end),
     {units:"meters"}
    );
+   
+   // Actual physical distance traveled along the path
+   const totalDistance = turf.length(turf.lineString(coords), {units: "meters"});
+   activity.distance = totalDistance;
 
-   if(distance < 50){
+   if(displacement < 50){
     const polygonCoords = [...coords,start];
 
     // Ensure polygon is valid (at least 4 points)
