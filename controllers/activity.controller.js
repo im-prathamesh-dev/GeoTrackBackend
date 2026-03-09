@@ -67,109 +67,96 @@ exports.endActivity = async (req,res)=>{
   }
 
   activity.endedAt = new Date();
-
   const coords = activity.route.coordinates;
 
-  if (coords && coords.length >= 2) {
-   const start = coords[0];
-   const end = coords[coords.length-1];
+  try {
+    if (coords && coords.length >= 2) {
+     const start = coords[0];
+     const end = coords[coords.length-1];
 
-   // Straight-line displacement to check if they completed a loop
-   const displacement = turf.distance(
-    turf.point(start),
-    turf.point(end),
-    {units:"meters"}
-   );
-   
-   // Actual physical distance traveled along the path
-   const totalDistance = turf.length(turf.lineString(coords), {units: "meters"});
-   activity.distance = totalDistance;
+     // Validate points before passing to Turf
+     if (Array.isArray(start) && Array.isArray(end) && start.length === 2 && end.length === 2) {
+       // Straight-line displacement to check if they completed a loop
+       const displacement = turf.distance(
+        turf.point(start),
+        turf.point(end),
+        {units:"meters"}
+       );
+       
+       // Actual physical distance traveled along the path
+       const totalDistance = turf.length(turf.lineString(coords), {units: "meters"});
+       activity.distance = totalDistance;
 
-   if(displacement < 50){
-    const polygonCoords = [...coords,start];
+       if(displacement < 50){
+        const polygonCoords = [...coords, start]; // Close the polygon
 
-    // Ensure polygon is valid (at least 4 points)
-    if (polygonCoords.length >= 4) {
-      const polygon = turf.polygon([polygonCoords]);
-      const area = turf.area(polygon);
+        // Ensure polygon is valid (at least 4 points needed for a closed ring)
+        if (polygonCoords.length >= 4) {
+          const polygon = turf.polygon([polygonCoords]);
+          const area = turf.area(polygon);
 
-      // 1. Process Territory Takeovers (Slicing)
-      const existingTerritories = await Territory.find();
-      
-      for (const oldTerritory of existingTerritories) {
-        // Skip comparing against ourselves if we want players to be able to overlap their own land (optional)
-        // For hardcore mode, we'll let players overwrite their own old tracks too, keeping the newest.
-        
-        try {
-          const oldPoly = turf.polygon(oldTerritory.polygon.coordinates);
+          // 1. Process Territory Takeovers (Slicing)
+          const existingTerritories = await Territory.find();
           
-          // Check if the new polygon intersects the old one
-          if (turf.booleanIntersects(polygon, oldPoly)) {
-            // Subtract the new polygon from the old polygon
-            const difference = turf.difference(turf.featureCollection([oldPoly, polygon]));
-            
-            if (!difference) {
-              // The old territory was completely swallowed up by the new one
-              await Territory.findByIdAndDelete(oldTerritory._id);
-            } else if (difference.geometry.type === 'Polygon' || difference.geometry.type === 'MultiPolygon') {
-              // The old territory was partially eaten
+          for (const oldTerritory of existingTerritories) {
+            try {
+              const oldPoly = turf.polygon(oldTerritory.polygon.coordinates);
               
-              // Note: difference might return a MultiPolygon if it split the old one in two.
-              // For simplicity, if it returns a MultiPolygon, we can either save it as is (if schema supports),
-              // or just save the largest piece. Let's update the schema dynamically or assume Polygon.
-              // Mongoose Schema is strict to "Polygon", so if it's a MultiPolygon we'll just take the biggest chunk.
-              
-              let newGeometry = difference.geometry;
-              
-              if (newGeometry.type === 'MultiPolygon') {
-                // Find the largest polygon in the multipolygon
-                let maxArea = 0;
-                let biggestPolyCoords = null;
-                
-                newGeometry.coordinates.forEach(coords => {
-                  const p = turf.polygon(coords);
-                  const pArea = turf.area(p);
-                  if (pArea > maxArea) {
-                    maxArea = pArea;
-                    biggestPolyCoords = coords;
+              if (turf.booleanIntersects(polygon, oldPoly)) {
+                const difference = turf.difference(turf.featureCollection([oldPoly, polygon]));
+                if (!difference) {
+                  await Territory.findByIdAndDelete(oldTerritory._id);
+                } else if (difference.geometry.type === 'Polygon' || difference.geometry.type === 'MultiPolygon') {
+                  let newGeometry = difference.geometry;
+                  
+                  if (newGeometry.type === 'MultiPolygon') {
+                    let maxArea = 0;
+                    let biggestPolyCoords = null;
+                    newGeometry.coordinates.forEach(polyCoords => {
+                      const p = turf.polygon(polyCoords);
+                      const pArea = turf.area(p);
+                      if (pArea > maxArea) {
+                        maxArea = pArea;
+                        biggestPolyCoords = polyCoords;
+                      }
+                    });
+                    newGeometry = { type: 'Polygon', coordinates: biggestPolyCoords };
                   }
-                });
-                
-                newGeometry = { type: 'Polygon', coordinates: biggestPolyCoords };
+                  
+                  const newArea = turf.area(turf.polygon(newGeometry.coordinates));
+                  if (newArea < 10) { 
+                    await Territory.findByIdAndDelete(oldTerritory._id);
+                  } else {
+                    oldTerritory.polygon = newGeometry;
+                    oldTerritory.area = newArea;
+                    await oldTerritory.save();
+                  }
+                }
               }
-              
-              const newArea = turf.area(turf.polygon(newGeometry.coordinates));
-              
-              if (newArea < 10) { 
-                // If the remaining sliver is tiny, just delete it
-                await Territory.findByIdAndDelete(oldTerritory._id);
-              } else {
-                // Update the old territory with its new sliced geometry
-                oldTerritory.polygon = newGeometry;
-                oldTerritory.area = newArea;
-                await oldTerritory.save();
-              }
+            } catch (geomErr) {
+              console.error("Geometry Intersection Error:", geomErr);
             }
           }
-        } catch (geomErr) {
-          console.error("Geometry Intersection Error (skipping this poly):", geomErr);
-        }
-      }
 
-      // 2. Save the new Territory
-      const territory = await Territory.create({
-       userId:activity.userId,
-       polygon:polygon.geometry,
-       area
-      });
-      
-      // 3. Tell all clients to re-fetch the global map geometries
-      const io = req.app.get('io');
-      if (io) {
-        io.emit('territoryUpdate');
-      }
+          // 2. Save the new Territory
+          await Territory.create({
+           userId:activity.userId,
+           polygon:polygon.geometry,
+           area
+          });
+          
+          // 3. Tell all clients to re-fetch
+          const io = req.app.get('io');
+          if (io) {
+            io.emit('territoryUpdate');
+          }
+        }
+       }
+     }
     }
-   }
+  } catch (turfErr) {
+    console.error("Turf processing error during end activity:", turfErr);
+    // Even if Turf fails, we STILL want to save the activity and shut it down below
   }
 
   await activity.save();
@@ -183,6 +170,7 @@ exports.endActivity = async (req,res)=>{
   res.json(activity);
  } catch (err) {
   console.error("Error ending activity:", err);
-  res.status(500).json({ error: err.message });
+  // Do not crash, ensure the user UI gets a response so it can close the tracker
+  res.status(500).json({ error: err.message, message: "Tracker forced to stop" });
  }
 };
