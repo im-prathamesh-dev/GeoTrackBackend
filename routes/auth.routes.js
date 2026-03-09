@@ -14,7 +14,7 @@ router.get(
 /* Google Callback */
 router.get(
   "/google/callback",
-  passport.authenticate("google", { session: false, failureRedirect: `${process.env.CLIENT_URL || "http://localhost:5173"}/login?error=auth_failed` }),
+  passport.authenticate("google", { session: false, failureRedirect: `${process.env.CLIENT_URL || "https://geo-track-sage.vercel.app"}/login?error=auth_failed` }),
   authController.googleAuthCallback
 );
 router.get("/profile", authMiddleware, (req, res) => {

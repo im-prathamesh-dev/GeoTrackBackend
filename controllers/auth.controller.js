@@ -14,7 +14,7 @@ exports.googleAuthCallback = async (req, res) => {
       { expiresIn: "7d" }
     );
 
-    const frontendUrl = process.env.CLIENT_URL || "http://localhost:5173";
+    const frontendUrl =  "https://geo-track-sage.vercel.app";
     res.redirect(`${frontendUrl}/login?token=${token}`);
 
   } catch (error) {
