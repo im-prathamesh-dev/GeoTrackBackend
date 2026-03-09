@@ -4,7 +4,7 @@ const User = require("../models/User");
 
 const callbackURL =
   process.env.GOOGLE_CALLBACK_URL ||
-  `${process.env.SERVER_URL || "http://localhost:5000"}/api/v1/auth/google/callback`;
+  `${process.env.SERVER_URL || "https://geotrackbackend.onrender.com"}/api/v1/auth/google/callback`;
 
 passport.use(
   new GoogleStrategy(
