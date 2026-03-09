@@ -12,7 +12,7 @@ const Dbconnect = require ('./config/db');
 const authRoutes = require("./routes/auth.routes");
 const io = socketIo (server, {  
     cors: {
-        origin: process.env.CLIENT_URL || 'http://localhost:5173',
+        origin: process.env.CLIENT_URL || 'https://geo-track-sage.vercel.app/login',
         methods: ['GET', 'POST']
     }
 });
