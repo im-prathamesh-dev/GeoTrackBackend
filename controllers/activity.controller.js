@@ -95,41 +95,52 @@ exports.endActivity = async (req,res)=>{
           const polygon = turf.polygon([polygonCoords]);
           const area = turf.area(polygon);
 
-          // 1. Process Territory Takeovers (Slicing)
+          // 1. Process Territory Takeovers and Merges
           const existingTerritories = await Territory.find();
+          
+          let myCombinedGeometry = polygon; // Start with the new polygon
+          let territoriesToDelete = [];
           
           for (const oldTerritory of existingTerritories) {
             try {
               const oldPoly = turf.polygon(oldTerritory.polygon.coordinates);
               
-              if (turf.booleanIntersects(polygon, oldPoly)) {
-                const difference = turf.difference(turf.featureCollection([oldPoly, polygon]));
-                if (!difference) {
-                  await Territory.findByIdAndDelete(oldTerritory._id);
-                } else if (difference.geometry.type === 'Polygon' || difference.geometry.type === 'MultiPolygon') {
-                  let newGeometry = difference.geometry;
-                  
-                  if (newGeometry.type === 'MultiPolygon') {
-                    let maxArea = 0;
-                    let biggestPolyCoords = null;
-                    newGeometry.coordinates.forEach(polyCoords => {
-                      const p = turf.polygon(polyCoords);
-                      const pArea = turf.area(p);
-                      if (pArea > maxArea) {
-                        maxArea = pArea;
-                        biggestPolyCoords = polyCoords;
-                      }
-                    });
-                    newGeometry = { type: 'Polygon', coordinates: biggestPolyCoords };
-                  }
-                  
-                  const newArea = turf.area(turf.polygon(newGeometry.coordinates));
-                  if (newArea < 10) { 
-                    await Territory.findByIdAndDelete(oldTerritory._id);
-                  } else {
-                    oldTerritory.polygon = newGeometry;
-                    oldTerritory.area = newArea;
-                    await oldTerritory.save();
+              if (turf.booleanIntersects(polygon, oldPoly) || turf.booleanIntersects(myCombinedGeometry, oldPoly)) {
+                if (oldTerritory.userId.toString() === activity.userId.toString()) {
+                  // Merge if same user
+                  myCombinedGeometry = turf.union(turf.featureCollection([myCombinedGeometry, oldPoly]));
+                  territoriesToDelete.push(oldTerritory._id);
+                } else {
+                  // Slice if other user
+                  const difference = turf.difference(turf.featureCollection([oldPoly, polygon]));
+                  if (!difference) {
+                    territoriesToDelete.push(oldTerritory._id);
+                  } else if (difference.geometry.type === 'Polygon' || difference.geometry.type === 'MultiPolygon') {
+                    let newGeometry = difference.geometry;
+                    
+                    if (newGeometry.type === 'MultiPolygon') {
+                       // Mongoose schema only supports 'Polygon' type currently, so keep the largest piece
+                      let maxArea = 0;
+                      let biggestPolyCoords = null;
+                      newGeometry.coordinates.forEach(polyCoords => {
+                        const p = turf.polygon(polyCoords);
+                        const pArea = turf.area(p);
+                        if (pArea > maxArea) {
+                          maxArea = pArea;
+                          biggestPolyCoords = polyCoords;
+                        }
+                      });
+                      newGeometry = { type: 'Polygon', coordinates: biggestPolyCoords };
+                    }
+                    
+                    const newArea = turf.area(turf.polygon(newGeometry.coordinates));
+                    if (newArea < 10) { 
+                      territoriesToDelete.push(oldTerritory._id);
+                    } else {
+                      oldTerritory.polygon = newGeometry;
+                      oldTerritory.area = newArea;
+                      await oldTerritory.save();
+                    }
                   }
                 }
               }
@@ -138,12 +149,29 @@ exports.endActivity = async (req,res)=>{
             }
           }
 
-          // 2. Save the new Territory
-          await Territory.create({
-           userId:activity.userId,
-           polygon:polygon.geometry,
-           area
-          });
+          // Delete all merged or consumed territories
+          for (const tId of territoriesToDelete) {
+            await Territory.findByIdAndDelete(tId);
+          }
+
+          // 2. Save the new/merged Territory
+          if (myCombinedGeometry.geometry.type === 'Polygon') {
+            await Territory.create({
+             userId: activity.userId,
+             polygon: myCombinedGeometry.geometry,
+             area: turf.area(myCombinedGeometry)
+            });
+          } else if (myCombinedGeometry.geometry.type === 'MultiPolygon') {
+            // Save each disconnected sub-polygon as a separate territory record
+            for (const polyCoords of myCombinedGeometry.geometry.coordinates) {
+              const singlePoly = turf.polygon(polyCoords);
+              await Territory.create({
+               userId: activity.userId,
+               polygon: singlePoly.geometry,
+               area: turf.area(singlePoly)
+              });
+            }
+          }
           
           // 3. Tell all clients to re-fetch
           const io = req.app.get('io');
